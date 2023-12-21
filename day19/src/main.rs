@@ -29,7 +29,7 @@ enum Part {
     Part2,
 }
 
-#[derive(Clone, Copy, Enum)]
+#[derive(Debug, Clone, Copy, Enum, PartialEq, Eq)]
 enum Category {
     X,
     M,
@@ -59,6 +59,7 @@ fn category(input: &str) -> IResult<&str, Category> {
     map_res(one_of("xmas"), Category::try_from)(input)
 }
 
+#[derive(Debug, Clone, Copy)]
 enum ComparisonType {
     Greater,
     Less,
@@ -90,6 +91,7 @@ fn value(input: &str) -> IResult<&str, usize> {
     map_res(digit1, str::parse)(input)
 }
 
+#[derive(Debug)]
 enum Rule {
     Comparison {
         category: Category,
@@ -169,8 +171,10 @@ const REJECT: &str = "R";
 const TERMINAL_LABELS: &[&str] = &[ACCEPT, REJECT];
 const INIT_LABEL: &str = "in";
 
-fn parse_workflows(inp: &mut Lines<impl BufRead>) -> Result<HashMap<String, Workflow>> {
-    let mut workflows = HashMap::new();
+type Workflows = HashMap<String, Workflow>;
+
+fn parse_workflows(inp: &mut Lines<impl BufRead>) -> Result<Workflows> {
+    let mut workflows = Workflows::new();
 
     while let Some(line) = inp.next() {
         let line = line?;
@@ -226,10 +230,7 @@ fn process_one<'a>(workflow: &'a Workflow, part: &PartRatings) -> &'a str {
     unreachable!("Should have encountered a default rule")
 }
 
-fn process(
-    workflows: HashMap<String, Workflow>,
-    parts: Vec<PartRatings>,
-) -> (Vec<PartRatings>, Vec<PartRatings>) {
+fn process(workflows: Workflows, parts: Vec<PartRatings>) -> (Vec<PartRatings>, Vec<PartRatings>) {
     let mut labeled: Vec<(&str, PartRatings)> =
         parts.into_iter().map(|part| (INIT_LABEL, part)).collect();
 
@@ -258,20 +259,147 @@ fn process(
     )
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy)]
+struct Interval {
+    lower_bound_incl: Value,
+    upper_bound_excl: Value,
+}
+
+const MIN_VAL: Value = 1;
+const MAX_VAL: Value = 4001;
+
+impl Default for Interval {
+    fn default() -> Self {
+        Self {
+            lower_bound_incl: MIN_VAL,
+            upper_bound_excl: MAX_VAL,
+        }
+    }
+}
+
+impl Interval {
+    fn count(&self) -> Value {
+        self.upper_bound_excl.saturating_sub(self.lower_bound_incl)
+    }
+
+    fn refine_if(&self, t: ComparisonType, v: Value) -> Self {
+        match t {
+            ComparisonType::Greater => Self {
+                lower_bound_incl: v + 1,
+                upper_bound_excl: self.upper_bound_excl,
+            },
+            ComparisonType::Less => Self {
+                lower_bound_incl: self.lower_bound_incl,
+                upper_bound_excl: v,
+            },
+        }
+    }
+
+    fn refine_else(&self, t: ComparisonType, v: Value) -> Self {
+        let (t, v) = match t {
+            ComparisonType::Greater => (ComparisonType::Less, v + 1),
+            ComparisonType::Less => (ComparisonType::Greater, v - 1),
+        };
+        self.refine_if(t, v)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Accepted {
+    map: EnumMap<Category, Interval>,
+}
+
+impl Accepted {
+    fn all() -> Self {
+        Self {
+            map: enum_map! {
+                _ => Interval { lower_bound_incl: MIN_VAL, upper_bound_excl: MAX_VAL }
+            },
+        }
+    }
+
+    fn none() -> Self {
+        Self {
+            map: enum_map! {
+                _ => Interval { lower_bound_incl: MIN_VAL, upper_bound_excl: MIN_VAL }
+            },
+        }
+    }
+
+    fn count(&self) -> Value {
+        self.map
+            .values()
+            .map(|intervals| intervals.count())
+            .product()
+    }
+
+    fn split_comparison(&self, category: Category, t: ComparisonType, v: usize) -> (Self, Self) {
+        let if_case = Self {
+            map: enum_map! {
+                c => if c == category { self.map[c].refine_if(t, v) } else {self.map[c]}
+            },
+        };
+
+        let else_case = Self {
+            map: enum_map! {
+                c => if c == category { self.map[c].refine_else(t, v) } else {self.map[c]}
+            },
+        };
+
+        (if_case, else_case)
+    }
+}
+
+fn determine_accepted(workflows: &Workflows, s: &String, mut prior: Accepted) -> Vec<Accepted> {
+    if *s == ACCEPT.to_string() {
+        return vec![prior];
+    } else if *s == REJECT.to_string() {
+        return Vec::new();
+    }
+    let workflow = workflows.get(s).expect("Invalid workflow name");
+
+    let mut res = Vec::new();
+    for rule in workflow {
+        let ((if_case, else_case), dep) = match rule {
+            Rule::Comparison {
+                category,
+                t,
+                v,
+                dest,
+            } => (prior.split_comparison(*category, *t, *v), dest),
+            Rule::Default { dest } => ((prior, Accepted::none()), dest),
+        };
+        res.extend(determine_accepted(workflows, dep, if_case).into_iter());
+        prior = else_case;
+    }
+
+    res
+}
+
+fn count_accepted(workflows: &Workflows) -> Value {
+    let accepted = determine_accepted(workflows, &INIT_LABEL.to_string(), Accepted::all());
+
+    accepted.into_iter().map(|accepted| accepted.count()).sum()
+}
+
 fn main() -> Result<()> {
-    let _args = Args::parse();
+    let args = Args::parse();
 
     let mut inp = stdin().lines();
 
     let workflows = parse_workflows(&mut inp)?;
-    let parts = parse_parts(&mut inp)?;
+    let res = match args.part {
+        Part::Part1 => {
+            let parts = parse_parts(&mut inp)?;
+            let (accept, _) = process(workflows, parts);
 
-    let (accept, _) = process(workflows, parts);
-
-    let res = accept
-        .into_iter()
-        .map(|part| part.values().sum::<Value>())
-        .sum::<Value>();
+            accept
+                .into_iter()
+                .map(|part| part.values().sum::<Value>())
+                .sum::<Value>()
+        }
+        Part::Part2 => count_accepted(&workflows),
+    };
 
     println!("{res}");
 
