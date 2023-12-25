@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.76"
 clap = { version = "4.4.11", features = ["derive"] }
-good_lp = "1.7.0"
 itertools = "0.12.0"
 nalgebra = "0.32.3"
 nom = "7.1.3"
+z3 = { version = "0.12.1", features = ["static-link-z3"] }

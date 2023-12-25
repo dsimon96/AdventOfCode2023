@@ -1,8 +1,7 @@
-use std::{io::stdin, ops::RangeInclusive};
+use std::io::stdin;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use good_lp::{constraint, default_solver, variable, Expression, ProblemVariables, SolverModel};
 use itertools::Itertools;
 use nalgebra::{convert, vector, Matrix2, Vector2, Vector3, LU};
 use nom::{
@@ -11,6 +10,7 @@ use nom::{
     sequence::{separated_pair, tuple},
     IResult,
 };
+use z3::{Config, Context, ast::{Int, Ast}, Solver, SatResult};
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -111,32 +111,40 @@ fn main() -> Result<()> {
             .filter(|&(a, b)| has_intersection(a, b, lb, ub))
             .count(),
         Part::Part2 => {
-            let mut vars = ProblemVariables::new();
-            let px = vars.add(variable().integer().name("px"));
-            let py = vars.add(variable().integer().name("py"));
-            let pz = vars.add(variable().integer().name("pz"));
-            let vx = vars.add(variable().integer().name("vx"));
-            let vy = vars.add(variable().integer().name("vy"));
-            let vz = vars.add(variable().integer().name("vz"));
-            let ts = vars.add_vector(variable().integer().min(0), hailstones.len());
+            let cfg = Config::new();
+            let ctx = Context::new(&cfg);
+            let solver = Solver::new(&ctx);
+            let px = Int::new_const(&ctx, "px");
+            let py = Int::new_const(&ctx, "py");
+            let pz = Int::new_const(&ctx, "pz");
+            let vx = Int::new_const(&ctx, "vx");
+            let vy = Int::new_const(&ctx, "vy");
+            let vz = Int::new_const(&ctx, "vz");
 
-            let mut model = vars
-                .minimise(ts.iter().sum::<Expression>())
-                .using(default_solver);
-
-            for (hailstone, t) in hailstones.into_iter().zip(ts) {
-                let hpx = hailstone.position.x;
-                let hpy = hailstone.position.y;
-                let hpz = hailstone.position.z;
-                let hvx = hailstone.velocity.x;
-                let hvy = hailstone.velocity.y;
-                let hvz = hailstone.velocity.z;
-                // model.add_constraint(constraint::eq(hvx * t + hpx, vx * t + px));
-                // model.add_constraint(constraint::eq(hvy * t + hpy, vy * t + py));
-                // model.add_constraint(constraint::eq(hvz * t + hpz, vz * t + pz));
+            for (i, hailstone) in hailstones.into_iter().enumerate() {
+                let t = Int::new_const(&ctx, format!("t{i}"));
+                solver.assert(&t.ge(&Int::from_i64(&ctx, 0)) );
+                let hx = hailstone.velocity.x * &t + hailstone.position.x;
+                let hy = hailstone.velocity.y * &t + hailstone.position.y;
+                let hz = hailstone.velocity.z * &t + hailstone.position.z;
+                let rx = &vx * &t + &px;
+                let ry = &vy * &t + &py;
+                let rz = &vz * &t + &pz;
+                solver.assert(&hx._eq(&rx));
+                solver.assert(&hy._eq(&ry));
+                solver.assert(&hz._eq(&rz));
             }
 
-            todo!()
+            let SatResult::Sat = solver.check() else {
+                bail!("Unsolvable!");
+            };
+
+            let model = solver.get_model().unwrap();
+            let px = model.get_const_interp(&px).and_then(|ast| ast.as_i64()).unwrap();
+            let py = model.get_const_interp(&py).and_then(|ast| ast.as_i64()).unwrap();
+            let pz = model.get_const_interp(&pz).and_then(|ast| ast.as_i64()).unwrap();
+
+            (px + py + pz).try_into()?
         }
     };
 
